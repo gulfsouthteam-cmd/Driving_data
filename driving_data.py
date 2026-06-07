@@ -61,7 +61,7 @@ def parse(data: dict) -> list:
         date = header.get("date", "")
         entity_groups = header.get("entity_groups", "")
 
-        # Skip empty tables (date = 01/01/0001)
+        # Skip empty tables
         if date == "01/01/0001":
             continue
 
@@ -76,7 +76,7 @@ def parse(data: dict) -> list:
             distance_m = record.get("length", {}).get("value", 0) or 0
             distance_mi = round(distance_m * 0.000621371, 2)
 
-            # Speed — source is km/h
+            # Speed — top_speed is km/h, avg_speed is m/s
             top_speed_kmh = record.get("top_speed", {}).get("value", 0) or 0
             top_speed_mph = round(top_speed_kmh * 0.621371, 1)
             avg_speed_ms = record.get("avg_speed", {}).get("value", 0) or 0
@@ -87,12 +87,16 @@ def parse(data: dict) -> list:
             zone = ", ".join(zone_names) if zone_names else ""
             job_number = _extract_job_number(zone)
 
-            # Address (populated on stop events)
+            # Address
             address = record.get("address", "") or ""
 
             # Engine idle
             engine_idle_s = record.get("engine_idle", {}).get("value", 0) or 0
             engine_idle_min = round(engine_idle_s / 60, 2)
+
+            # Driver
+            driver_names = record.get("driver_names") or []
+            driver = ", ".join(driver_names) if driver_names else ""
 
             # Upsert key
             upsert_key = f"{device}_{date}_{start_time}"
@@ -113,6 +117,7 @@ def parse(data: dict) -> list:
                 "engine_idle_min": engine_idle_min,
                 "top_speed_mph": top_speed_mph,
                 "avg_speed_mph": avg_speed_mph,
+                "driver": driver,
             })
 
     return rows
