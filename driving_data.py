@@ -1,6 +1,8 @@
 """
 OneStep GPS Day Start/End Breakdown — JSON parser + Flask endpoint.
-Make.com POSTs the .json file as multipart/form-data (field name: 'file')
+Returns two endpoints:
+  /process/stops — stop events at named zones/addresses
+  /process/summary — daily summary per device
 """
 
 from __future__ import annotations
@@ -19,30 +21,50 @@ app = Flask(__name__)
 API_KEY = os.environ.get("PIPELINE_API_KEY")
 
 
-@app.route("/process", methods=["POST"])
-def process():
+def check_auth():
     if API_KEY and request.headers.get("X-Api-Key") != API_KEY:
-        return jsonify({"ok": False, "error": "unauthorized"}), 401
+        return False
+    return True
 
+
+def get_file_bytes():
     upload = request.files.get("file")
-    if upload is None:
-        return jsonify({"ok": False, "error": "missing file"}), 400
+    if upload:
+        return upload.read()
+    return None
 
-    file_bytes = upload.read()
+
+@app.route("/process/stops", methods=["POST"])
+def process_stops():
+    if not check_auth():
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    file_bytes = get_file_bytes()
     if not file_bytes:
-        return jsonify({"ok": False, "error": "empty file"}), 400
-
+        return jsonify({"ok": False, "error": "missing file"}), 400
     try:
         data = json.loads(file_bytes)
-        rows = parse(data)
-    except ValueError as e:
-        log.warning("parse failed: %s", e)
-        return jsonify({"ok": False, "error": str(e)}), 422
+        rows = parse_stops(data)
     except Exception as e:
-        log.exception("unexpected parse error")
-        return jsonify({"ok": False, "error": f"parse failed: {e}"}), 500
+        log.exception("parse error")
+        return jsonify({"ok": False, "error": str(e)}), 500
+    log.info("stops parsed rows=%d", len(rows))
+    return jsonify(rows), 200
 
-    log.info("parsed rows=%d", len(rows))
+
+@app.route("/process/summary", methods=["POST"])
+def process_summary():
+    if not check_auth():
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    file_bytes = get_file_bytes()
+    if not file_bytes:
+        return jsonify({"ok": False, "error": "missing file"}), 400
+    try:
+        data = json.loads(file_bytes)
+        rows = parse_summary(data)
+    except Exception as e:
+        log.exception("parse error")
+        return jsonify({"ok": False, "error": str(e)}), 500
+    log.info("summary parsed rows=%d", len(rows))
     return jsonify(rows), 200
 
 
@@ -51,7 +73,7 @@ def health():
     return jsonify({"ok": True, "service": "gps-day-start-end-parser"}), 200
 
 
-def parse(data: dict) -> list:
+def parse_stops(data: dict) -> list:
     tables = data.get("tables", [])
     rows = []
 
@@ -61,44 +83,28 @@ def parse(data: dict) -> list:
         date = header.get("date", "")
         entity_groups = header.get("entity_groups", "")
 
-        # Skip empty tables
         if date == "01/01/0001":
             continue
 
         for record in table.get("record_list", []):
             status = record.get("status", "")
+
+            # Only process stop events
+            if status != "stop":
+                continue
+
             start_time = record.get("start_time", "")
             end_time = record.get("end_time", "")
             duration_s = record.get("duration", {}).get("value", 0) or 0
             duration_min = round(duration_s / 60, 2)
-
-            # Distance
-            distance_m = record.get("length", {}).get("value", 0) or 0
-            distance_mi = round(distance_m * 0.000621371, 2)
-
-            # Speed — top_speed is km/h, avg_speed is m/s
-            top_speed_kmh = record.get("top_speed", {}).get("value", 0) or 0
-            top_speed_mph = round(top_speed_kmh * 0.621371, 1)
-            avg_speed_ms = record.get("avg_speed", {}).get("value", 0) or 0
-            avg_speed_mph = round(avg_speed_ms * 2.23694, 1)
-
-            # Zone and job number
             zone_names = record.get("zone_names") or []
             zone = ", ".join(zone_names) if zone_names else ""
             job_number = _extract_job_number(zone)
-
-            # Address
             address = record.get("address", "") or ""
-
-            # Engine idle
             engine_idle_s = record.get("engine_idle", {}).get("value", 0) or 0
             engine_idle_min = round(engine_idle_s / 60, 2)
-
-            # Driver
             driver_names = record.get("driver_names") or []
             driver = ", ".join(driver_names) if driver_names else ""
-
-            # Upsert key
             upsert_key = f"{device}_{date}_{start_time}"
 
             rows.append({
@@ -106,19 +112,70 @@ def parse(data: dict) -> list:
                 "device": device,
                 "entity_groups": entity_groups,
                 "date": date,
-                "status": status,
                 "start_time": start_time,
                 "end_time": end_time,
                 "duration_min": duration_min,
-                "distance_mi": distance_mi,
                 "zone": zone,
                 "job_number": job_number,
                 "address": address,
                 "engine_idle_min": engine_idle_min,
-                "top_speed_mph": top_speed_mph,
-                "avg_speed_mph": avg_speed_mph,
                 "driver": driver,
             })
+
+    return rows
+
+
+def parse_summary(data: dict) -> list:
+    tables = data.get("tables", [])
+    rows = []
+
+    for table in tables:
+        header = table.get("header", {})
+        device = header.get("entity_name", "")
+        date = header.get("date", "")
+        entity_groups = header.get("entity_groups", "")
+
+        if date == "01/01/0001":
+            continue
+
+        footer = table.get("footer", {})
+
+        total_distance_mi = footer.get("total_distance", {}).get("value", 0) or 0
+        total_driving_s = footer.get("total_time_driving", {}).get("value", 0) or 0
+        total_driving_min = round(total_driving_s / 60, 2)
+        total_stopped_s = footer.get("total_time_stopped", {}).get("value", 0) or 0
+        total_stopped_min = round(total_stopped_s / 60, 2)
+        total_worked_s = footer.get("total_time_worked", {}).get("value", 0) or 0
+        total_worked_min = round(total_worked_s / 60, 2)
+        number_stops = footer.get("number_stops", 0) or 0
+        start_time = footer.get("start_time", "")
+        end_time = footer.get("end_time", "")
+        start_address = footer.get("start_address", "") or ""
+        end_address = footer.get("end_address", "") or ""
+        engine_idle_s = footer.get("total_engine_idle", {}).get("value", 0) or 0
+        engine_idle_min = round(engine_idle_s / 60, 2)
+        stopped_idle_s = footer.get("total_stopped_engine_idle", {}).get("value", 0) or 0
+        stopped_idle_min = round(stopped_idle_s / 60, 2)
+
+        upsert_key = f"{device}_{date}"
+
+        rows.append({
+            "upsert_key": upsert_key,
+            "device": device,
+            "entity_groups": entity_groups,
+            "date": date,
+            "start_time": start_time,
+            "end_time": end_time,
+            "start_address": start_address,
+            "end_address": end_address,
+            "total_distance_mi": round(float(total_distance_mi), 2),
+            "total_driving_min": total_driving_min,
+            "total_stopped_min": total_stopped_min,
+            "total_worked_min": total_worked_min,
+            "number_stops": number_stops,
+            "engine_idle_min": engine_idle_min,
+            "stopped_idle_min": stopped_idle_min,
+        })
 
     return rows
 
