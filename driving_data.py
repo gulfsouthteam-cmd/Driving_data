@@ -9,7 +9,6 @@ import logging
 import os
 import re
 import json
-from datetime import datetime, timezone
 from flask import Flask, jsonify, request
 
 log = logging.getLogger(__name__)
@@ -62,21 +61,38 @@ def parse(data: dict) -> list:
         date = header.get("date", "")
         entity_groups = header.get("entity_groups", "")
 
+        # Skip empty tables (date = 01/01/0001)
+        if date == "01/01/0001":
+            continue
+
         for record in table.get("record_list", []):
             status = record.get("status", "")
             start_time = record.get("start_time", "")
             end_time = record.get("end_time", "")
             duration_s = record.get("duration", {}).get("value", 0) or 0
             duration_min = round(duration_s / 60, 2)
+
+            # Distance
             distance_m = record.get("length", {}).get("value", 0) or 0
             distance_mi = round(distance_m * 0.000621371, 2)
+
+            # Speed — source is km/h
+            top_speed_kmh = record.get("top_speed", {}).get("value", 0) or 0
+            top_speed_mph = round(top_speed_kmh * 0.621371, 1)
+            avg_speed_ms = record.get("avg_speed", {}).get("value", 0) or 0
+            avg_speed_mph = round(avg_speed_ms * 2.23694, 1)
+
+            # Zone and job number
             zone_names = record.get("zone_names") or []
             zone = ", ".join(zone_names) if zone_names else ""
             job_number = _extract_job_number(zone)
+
+            # Address (populated on stop events)
+            address = record.get("address", "") or ""
+
+            # Engine idle
             engine_idle_s = record.get("engine_idle", {}).get("value", 0) or 0
             engine_idle_min = round(engine_idle_s / 60, 2)
-            top_speed_mph = round((record.get("top_speed", {}).get("value", 0) or 0) * 0.0223694, 1)
-            avg_speed_mph = round((record.get("avg_speed", {}).get("value", 0) or 0) * 2.23694, 1)
 
             # Upsert key
             upsert_key = f"{device}_{date}_{start_time}"
@@ -93,6 +109,7 @@ def parse(data: dict) -> list:
                 "distance_mi": distance_mi,
                 "zone": zone,
                 "job_number": job_number,
+                "address": address,
                 "engine_idle_min": engine_idle_min,
                 "top_speed_mph": top_speed_mph,
                 "avg_speed_mph": avg_speed_mph,
