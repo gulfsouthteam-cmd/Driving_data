@@ -89,7 +89,6 @@ def parse_stops(data: dict) -> list:
         for record in table.get("record_list", []):
             status = record.get("status", "")
 
-            # Only process stop events
             if status != "stop":
                 continue
 
@@ -183,10 +182,16 @@ def parse_summary(data: dict) -> list:
 def _extract_job_number(zone: str) -> str:
     if not zone:
         return ""
+    # Pattern 1: trailing number after - or # (e.g. "Job Name - 3921" or "Job Name #3754")
     m = re.search(r"[-#]\s*(\d{3,5})\s*$", zone)
     if m:
         return m.group(1)
+    # Pattern 2: leading number after # (e.g. "#2342 Job Name")
     m = re.search(r"^#?\s*(\d{3,5})\b", zone)
+    if m:
+        return m.group(1)
+    # Pattern 3: trailing number after just a space (e.g. "Bonne Ecole Roof 4775")
+    m = re.search(r"\s(\d{3,5})\s*$", zone)
     if m:
         return m.group(1)
     return ""
